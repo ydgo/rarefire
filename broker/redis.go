@@ -6,7 +6,51 @@ import (
 	"sync"
 )
 
-// 目前仅支持list类型的topic
+type publication struct {
+	topic   string
+	message *Message
+	err     error
+}
+
+func (p *publication) Topic() string {
+	return p.topic
+}
+
+func (p *publication) Message() *Message {
+	return p.message
+}
+
+type subscriber struct {
+	pubSub *redis.PubSub
+	topic  string
+	handle Handler
+}
+
+func (s *subscriber) recv() {
+	defer s.pubSub.Close()
+	for msg := range s.pubSub.Channel() {
+		var m Message
+		m.Body = []byte(msg.Payload)
+		p := publication{
+			topic:   msg.Channel,
+			message: &m,
+		}
+		if p.err = s.handle(&p); p.err != nil {
+			break
+		}
+		// handle error?
+	}
+}
+
+// Unsubscribe unsubscribes the subscriber and frees the connection.
+func (s *subscriber) Unsubscribe() error {
+	return s.pubSub.Unsubscribe(s.topic)
+}
+
+// Topic returns the topic of the subscriber.
+func (s *subscriber) Topic() string {
+	return s.topic
+}
 
 type redisBroker struct {
 	sync.Mutex
@@ -37,41 +81,22 @@ func (r *redisBroker) Close() error {
 }
 
 func (r *redisBroker) Publish(topic string, m *Message) error {
-	return r.c.LPush(topic, string(m.body)).Err()
+	return r.c.Publish(topic, string(m.Body)).Err()
 }
 
-func (r *redisBroker) Subscribe(topic string, h Handler) error {
-	v, err := r.c.RPop(topic).Result()
-	if err != nil {
-		return err
+func (r *redisBroker) Subscribe(topic string, h Handler) (Subscriber, error) {
+	s := subscriber{
+		pubSub: r.c.Subscribe(topic),
+		topic:  topic,
+		handle: h,
 	}
-	return h(&listElement{Key: topic, Body: []byte(v)})
+	go s.recv()
+	return &s, nil
 }
 
 func NewRedisBroker(addr string) Broker {
 	return &redisBroker{
 		addr:      addr,
 		connected: false,
-	}
-}
-
-// 实现一个列表类型的消息队列进行订阅和发布
-type listElement struct {
-	Key  string
-	Body []byte
-}
-
-func (l *listElement) Topic() string {
-	return l.Key
-}
-
-func (l *listElement) Message() *Message {
-	return &Message{body: l.Body}
-}
-
-func NewListElement(event Event) Event {
-	return &listElement{
-		Key:  event.Topic(),
-		Body: event.Message().body,
 	}
 }
